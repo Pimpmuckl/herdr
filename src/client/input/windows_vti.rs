@@ -452,8 +452,10 @@ impl WindowsInputMapper {
             return false;
         }
 
+        // Physical Escape carries a scan code; scan-code-zero ESC can introduce raw reports.
         let bare_escape = modifiers.is_empty()
-            && (key.virtual_key_code == 0x1b || (key.virtual_key_code == 0 && key.unicode == 0x1b));
+            && ((key.virtual_key_code == 0x1b && key.virtual_scan_code == 0)
+                || (key.virtual_key_code == 0 && key.unicode == 0x1b));
         let ctrl_bracket = key.virtual_key_code == 0xdb
             && key.unicode == 0x1b
             && modifiers == crossterm::event::KeyModifiers::CONTROL;
@@ -1338,11 +1340,9 @@ mod tests {
     }
 
     #[test]
-    fn vti_escape_key_record_flushes_to_escape_after_idle() {
-        let mut translator = WindowsInputTranslator::default();
-        assert!(translator.translate(key_vk(0x1b, 0)).is_empty());
+    fn vti_physical_escape_key_record_is_immediately_semantic() {
         assert_eq!(
-            translator.idle(),
+            translate([key_vk_with_scan_unicode(0x1b, 1, '\0', 0)]),
             vec![crate::protocol::ClientInputEvent::Key {
                 code: crate::protocol::ClientKeyCode::Esc,
                 modifiers: 0,
@@ -1752,8 +1752,8 @@ mod tests {
     }
 
     #[test]
-    fn vti_escape_key_record_without_unicode_starts_mouse_sequence() {
-        let records = [key_vk(0x1b, 0)]
+    fn vti_scan_code_zero_escape_starts_mouse_sequence() {
+        let records = [key_vk_with_scan_unicode(0x1b, 0, '\0', 0)]
             .into_iter()
             .chain("[<35;48;26M".chars().map(key_char));
 
