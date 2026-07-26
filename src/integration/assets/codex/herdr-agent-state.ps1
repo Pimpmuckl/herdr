@@ -2,7 +2,7 @@
 # managed by herdr; reinstalling or updating the integration overwrites this file.
 # add custom hooks beside this file instead of editing it.
 # HERDR_INTEGRATION_ID=codex
-# HERDR_INTEGRATION_VERSION=6
+# HERDR_INTEGRATION_VERSION=7
 
 param([string]$Action = "")
 
@@ -24,7 +24,7 @@ if ([string]::IsNullOrWhiteSpace($sessionId)) { exit 0 }
 
 $seq = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
 try {
-    $args = @(
+    $herdrArgs = @(
         "pane",
         "report-agent-session",
         $env:HERDR_PANE_ID,
@@ -38,8 +38,11 @@ try {
         "$sessionId"
     )
     if ($payload.hook_event_name -eq "SessionStart" -and $payload.source -is [string] -and -not [string]::IsNullOrWhiteSpace($payload.source)) {
-        $args += @("--session-start-source", "$($payload.source)")
+        $herdrArgs += @("--session-start-source", "$($payload.source)")
     }
-    & herdr @args 2>$null | Out-Null
+    if (-not [string]::IsNullOrWhiteSpace($env:CODEX_THREAD_ID) -and $env:CODEX_THREAD_ID -ne $sessionId) {
+        $herdrArgs += @("--parent-agent-session-id", "$env:CODEX_THREAD_ID")
+    }
+    & herdr @herdrArgs 2>$null | Out-Null
 } catch {
 }
