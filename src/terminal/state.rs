@@ -58,6 +58,14 @@ struct StaleFullLifecycleHookSession {
     session_ref: crate::agent_resume::AgentSessionRef,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct NestedAgentSessions {
+    source: String,
+    agent_label: String,
+    owner_session_ref: crate::agent_resume::AgentSessionRef,
+    session_refs: Vec<crate::agent_resume::AgentSessionRef>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ManagedAgentPhase {
     Pending {
@@ -135,6 +143,7 @@ pub struct TerminalState {
     hook_report_sequences: HashMap<String, u64>,
     suppressed_full_lifecycle_hook_reports: HashMap<String, SuppressedFullLifecycleHookReport>,
     stale_full_lifecycle_hook_sessions: HashMap<String, Vec<StaleFullLifecycleHookSession>>,
+    nested_agent_sessions: Option<NestedAgentSessions>,
     metadata_report_sequences: HashMap<String, u64>,
     metadata_report_agents: HashMap<String, Agent>,
     metadata_token_sequence_sources: std::collections::HashSet<String>,
@@ -168,6 +177,7 @@ impl TerminalState {
             hook_report_sequences: HashMap::new(),
             suppressed_full_lifecycle_hook_reports: HashMap::new(),
             stale_full_lifecycle_hook_sessions: HashMap::new(),
+            nested_agent_sessions: None,
             metadata_report_sequences: HashMap::new(),
             metadata_report_agents: HashMap::new(),
             metadata_token_sequence_sources: std::collections::HashSet::new(),
@@ -1326,6 +1336,25 @@ impl TerminalState {
         seq: Option<u64>,
         session_start_source: Option<String>,
     ) -> Option<TerminalStateMutation> {
+        self.set_agent_session_ref_from_report(
+            source,
+            agent_label,
+            session_ref,
+            seq,
+            session_start_source,
+            None,
+        )
+    }
+
+    pub fn set_agent_session_ref_from_report(
+        &mut self,
+        source: String,
+        agent_label: String,
+        session_ref: Option<crate::agent_resume::AgentSessionRef>,
+        seq: Option<u64>,
+        session_start_source: Option<String>,
+        parent_session_ref: Option<crate::agent_resume::AgentSessionRef>,
+    ) -> Option<TerminalStateMutation> {
         let session_ref = session_ref?;
         let known_agent = crate::detect::parse_agent_label(&agent_label);
         let process_present = known_agent.is_some()
@@ -1413,6 +1442,58 @@ impl TerminalState {
         if self.known_agent_label_conflicts_with_detected_agent(&agent_label) {
             return None;
         }
+        let current_owner_session_ref = self.current_session_identity_for_persistence().and_then(
+            |(current_source, current_agent, current_kind, current_value)| {
+                (current_source == source && current_agent == agent_label).then_some(
+                    crate::agent_resume::AgentSessionRef {
+                        kind: current_kind,
+                        value: current_value,
+                    },
+                )
+            },
+        );
+        let nested_session = parent_session_ref
+            .as_ref()
+            .is_some_and(|parent_session_ref| {
+                parent_session_ref != &session_ref
+                    && current_owner_session_ref
+                        .as_ref()
+                        .is_some_and(|owner_session_ref| {
+                            parent_session_ref == owner_session_ref
+                                || self.nested_agent_sessions.as_ref().is_some_and(|nested| {
+                                    nested.source == source
+                                        && nested.agent_label == agent_label
+                                        && &nested.owner_session_ref == owner_session_ref
+                                        && nested.session_refs.contains(parent_session_ref)
+                                })
+                        })
+            });
+        if nested_session {
+            let owner_session_ref = current_owner_session_ref?;
+            let nested = self
+                .nested_agent_sessions
+                .get_or_insert_with(|| NestedAgentSessions {
+                    source: source.clone(),
+                    agent_label: agent_label.clone(),
+                    owner_session_ref: owner_session_ref.clone(),
+                    session_refs: Vec::new(),
+                });
+            if nested.source != source
+                || nested.agent_label != agent_label
+                || nested.owner_session_ref != owner_session_ref
+            {
+                *nested = NestedAgentSessions {
+                    source: source.clone(),
+                    agent_label: agent_label.clone(),
+                    owner_session_ref,
+                    session_refs: Vec::new(),
+                };
+            }
+            if !nested.session_refs.contains(&session_ref) {
+                nested.session_refs.push(session_ref);
+            }
+            return None;
+        }
         let session_replacement_allowed = Self::session_start_source_allows_session_replacement(
             &source,
             &agent_label,
@@ -1493,6 +1574,10 @@ impl TerminalState {
             session_ref,
         });
         let current_session = self.current_session_identity_for_persistence();
+        let session_ref_changed = previous_session != current_session;
+        if session_ref_changed {
+            self.nested_agent_sessions = None;
+        }
         Some(TerminalStateMutation {
             effective_state_change: self.recompute_effective_state(
                 previous_agent_label,
@@ -1501,7 +1586,7 @@ impl TerminalState {
                 previous_presentation,
                 now,
             ),
-            session_ref_changed: previous_session != current_session,
+            session_ref_changed,
             agent_released: false,
         })
     }
@@ -1938,6 +2023,7 @@ impl TerminalState {
         self.metadata_report_agents.clear();
         self.suppressed_full_lifecycle_hook_reports.clear();
         self.stale_full_lifecycle_hook_sessions.clear();
+        self.nested_agent_sessions = None;
         self.state = AgentState::Unknown;
         self.last_agent_state_change_seq = None;
         self.launch_argv = None;
@@ -4398,6 +4484,64 @@ mod tests {
                 Some(next_session.as_str())
             );
         }
+
+        let mut terminal = test_terminal();
+        terminal
+            .set_agent_session_ref(
+                "herdr:codex".into(),
+                "codex".into(),
+                crate::agent_resume::AgentSessionRef::id("codex-session"),
+                Some(20),
+            )
+            .expect("initial session should be accepted");
+
+        let mutation = terminal.set_agent_session_ref_from_report(
+            "herdr:codex".into(),
+            "codex".into(),
+            crate::agent_resume::AgentSessionRef::id("nested-session"),
+            Some(21),
+            Some("startup".into()),
+            crate::agent_resume::AgentSessionRef::id("codex-session"),
+        );
+
+        assert!(mutation.is_none());
+        let mutation = terminal.set_agent_session_ref_from_report(
+            "herdr:codex".into(),
+            "codex".into(),
+            crate::agent_resume::AgentSessionRef::id("deeply-nested-session"),
+            Some(22),
+            Some("startup".into()),
+            crate::agent_resume::AgentSessionRef::id("nested-session"),
+        );
+
+        assert!(mutation.is_none());
+        assert_eq!(
+            terminal
+                .persisted_agent_session
+                .as_ref()
+                .map(|session| session.session_ref.value.as_str()),
+            Some("codex-session")
+        );
+
+        let mutation = terminal
+            .set_agent_session_ref_from_report(
+                "herdr:codex".into(),
+                "codex".into(),
+                crate::agent_resume::AgentSessionRef::id("fresh-session"),
+                Some(23),
+                Some("startup".into()),
+                crate::agent_resume::AgentSessionRef::id("stale-session"),
+            )
+            .expect("an unrelated parent should not block session replacement");
+
+        assert!(mutation.session_ref_changed);
+        assert_eq!(
+            terminal
+                .persisted_agent_session
+                .as_ref()
+                .map(|session| session.session_ref.value.as_str()),
+            Some("fresh-session")
+        );
     }
 
     #[test]
