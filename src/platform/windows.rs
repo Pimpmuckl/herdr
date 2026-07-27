@@ -56,15 +56,26 @@ use super::{ClipboardImage, ForegroundJob, Signal};
 const STILL_ACTIVE: u32 = 259;
 const FOREGROUND_PROCESS_SNAPSHOT_CACHE_TTL: Duration = Duration::from_millis(250);
 
-pub(crate) fn encode_windows_conpty_shift_enter(key: crate::input::TerminalKey) -> Option<Vec<u8>> {
+/// Targeted Win32-input fallbacks for keys legacy VT cannot preserve.
+///
+/// Keep this list small; full fidelity belongs in native key-record transport.
+pub(crate) fn encode_windows_conpty_fallback(key: crate::input::TerminalKey) -> Option<Vec<u8>> {
     use crossterm::event::{KeyCode, KeyEventKind, KeyModifiers};
 
-    if key.code != KeyCode::Enter || key.modifiers != KeyModifiers::SHIFT {
-        return None;
-    }
+    let (virtual_key, scan_code, unicode, control_state) = match (key.code, key.modifiers) {
+        (KeyCode::Esc, KeyModifiers::NONE) => (27, 1, 27, 0),
+        (KeyCode::Enter, KeyModifiers::SHIFT) => (13, 28, 13, 16),
+        _ => return None,
+    };
 
     let key_down = !matches!(key.kind, KeyEventKind::Release);
-    Some(format!("\x1b[13;28;13;{};16;1_", u8::from(key_down)).into_bytes())
+    Some(
+        format!(
+            "\x1b[{virtual_key};{scan_code};{unicode};{};{control_state};1_",
+            u8::from(key_down)
+        )
+        .into_bytes(),
+    )
 }
 
 #[derive(Debug)]
