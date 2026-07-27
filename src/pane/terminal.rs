@@ -1625,7 +1625,7 @@ impl GhosttyPaneTerminal {
         protocol: crate::input::KeyboardProtocol,
     ) -> Vec<u8> {
         #[cfg(windows)]
-        if let Some(bytes) = crate::platform::encode_windows_conpty_shift_enter(key) {
+        if let Some(bytes) = crate::platform::encode_windows_conpty_fallback(key) {
             if self.core.lock().is_ok_and(|core| {
                 core.terminal
                     .kitty_keyboard_flags()
@@ -3932,6 +3932,23 @@ mod tests {
             Some(crate::input::KeyboardProtocol::Kitty { flags: 5 })
         );
         assert_eq!(encoded, b"\x1b[13;2u");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn ghostty_default_pane_encodes_escape_as_conpty_input_record() {
+        let (tx, _rx) = mpsc::channel(4);
+        let terminal = crate::ghostty::Terminal::new(80, 24, 0).unwrap();
+        let pane = GhosttyPaneTerminal::new(terminal, tx).unwrap();
+        let key = crate::input::TerminalKey::new(
+            crossterm::event::KeyCode::Esc,
+            crossterm::event::KeyModifiers::NONE,
+        );
+
+        assert_eq!(
+            pane.encode_terminal_key(key, crate::input::KeyboardProtocol::Legacy),
+            b"\x1b[27;1;27;1;0;1_"
+        );
     }
 
     #[cfg(unix)]
